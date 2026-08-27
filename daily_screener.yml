@@ -1,0 +1,31 @@
+name: Daily Stock Screener
+
+on:
+  schedule:
+    # 17:45 CET/CEST circa (dopo la chiusura dei mercati europei, USA ancora aperti).
+    # GitHub Actions usa sempre UTC: 15:45 UTC = 17:45 CEST (estate) / 16:45 CET (inverno).
+    # Modifica l'orario a piacere.
+    - cron: "45 15 * * 1-5"
+  workflow_dispatch: {}   # permette anche l'avvio manuale dal sito GitHub
+
+jobs:
+  run-screener:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run screener
+        env:
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python telegram-stock-bot/stock_screener.py
