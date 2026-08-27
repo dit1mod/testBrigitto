@@ -2,10 +2,12 @@ name: Daily Stock Screener
 
 on:
   schedule:
-    # 17:45 CET/CEST circa (dopo la chiusura dei mercati europei, USA ancora aperti).
-    # GitHub Actions usa sempre UTC: 15:45 UTC = 17:45 CEST (estate) / 16:45 CET (inverno).
-    # Modifica l'orario a piacere.
-    - cron: "45 15 * * 1-5"
+    # 9:35 ET (apertura mercati USA + 5 min di margine).
+    # ATTENZIONE: l'orario UTC cambia con l'ora legale/solare USA (DST):
+    #   - Ora legale USA (EDT, marzo-inizio novembre): 9:35 ET = 13:35 UTC (valore attuale sotto)
+    #   - Ora solare USA (EST, inizio novembre-marzo): 9:35 ET = 14:35 UTC
+    # Va aggiornato manualmente 2 volte l'anno cambiando il valore "35 13" sotto.
+    - cron: "35 13 * * 1-5"
   workflow_dispatch: {}   # permette anche l'avvio manuale dal sito GitHub
 
 jobs:
