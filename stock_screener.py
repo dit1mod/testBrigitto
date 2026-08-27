@@ -30,9 +30,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "527421998")
 
 # Lista titoli da monitorare (USA + Europa). Max ~12 per stare nel limite free.
 WATCHLIST = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",   # USA
-    "SAP.DEX", "ASML.AS", "OR.PAR",            # Europa (SAP, ASML, L'Oreal)
-    "ENI.MIL", "ENEL.MIL",                     # Italia
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",
+    "META", "TSLA", "AMD", "NFLX", "JPM",
 ]
 
 # Soglia di calo giornaliero per far scattare l'analisi (in percentuale, valore assoluto)
