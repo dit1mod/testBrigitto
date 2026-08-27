@@ -33,7 +33,11 @@ TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}"
 
 CALO_MINIMO_PCT = 4.5
 RSI_IPERVENDUTO = 40
-MAX_TITOLI_ANALISI_APPROFONDITA = 6
+PREZZO_MINIMO = 5.0
+VOLUME_MINIMO = 500000
+SCONTO_TARGET_MINIMO_PCT = 15.0
+PUNTEGGIO_MINIMO_OCCASIONE = 2
+MAX_TITOLI_ANALISI_APPROFONDITA = 7
 
 STATO_FILE = "last_update_id.txt"
 
@@ -118,23 +122,46 @@ def comando_mercato():
 # COMANDO: /analizza  (stessa logica dello screener giornaliero)
 # ---------------------------------------------------------------------------
 
-def get_top_losers():
+def get_candidati_mercato():
+    """Combina i top losers con i titoli piu' scambiati in rosso (1 chiamata API)."""
     if not _consuma_budget():
         return []
     params = {"function": "TOP_GAINERS_LOSERS", "apikey": ALPHA_VANTAGE_API_KEY}
     r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
-    data = r.json().get("top_losers", [])
-    risultati = []
-    for item in data:
-        try:
-            risultati.append({
-                "symbol": item["ticker"],
-                "price": float(item["price"]),
-                "change_pct": -abs(float(item["change_percentage"].replace("%", ""))),
-            })
-        except (KeyError, ValueError):
-            continue
-    return risultati
+    data = r.json()
+
+    def _parse(lista, fonte):
+        risultati = []
+        for item in lista:
+            try:
+                risultati.append({
+                    "symbol": item["ticker"],
+                    "price": float(item["price"]),
+                    "change_pct": -abs(float(item["change_percentage"].replace("%", ""))),
+                    "volume": int(item["volume"]),
+                    "fonte": fonte,
+                })
+            except (KeyError, ValueError):
+                continue
+        return risultati
+
+    top_losers = _parse(data.get("top_losers", []), "top_loser")
+    most_active = [
+        t for t in _parse(data.get("most_actively_traded", []), "most_active")
+        if t["change_pct"] < 0
+    ]
+
+    combinati = {t["symbol"]: t for t in most_active}
+    combinati.update({t["symbol"]: t for t in top_losers})
+    return list(combinati.values())
+
+
+def supera_prefiltro(t):
+    if t["price"] < PREZZO_MINIMO or t["volume"] < VOLUME_MINIMO:
+        return False
+    if t["fonte"] == "top_loser":
+        return t["change_pct"] <= -CALO_MINIMO_PCT
+    return True
 
 
 def get_rsi(symbol):
@@ -165,6 +192,24 @@ def get_sma(symbol, time_period):
         return None
     ultima = sorted(data.keys(), reverse=True)[0]
     return float(data[ultima]["SMA"])
+
+
+def get_analyst_data(symbol):
+    if not _consuma_budget():
+        return None
+    params = {"function": "OVERVIEW", "symbol": symbol, "apikey": ALPHA_VANTAGE_API_KEY}
+    r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
+    data = r.json()
+    if not data or "AnalystTargetPrice" not in data:
+        return None
+    try:
+        target_price = float(data.get("AnalystTargetPrice", 0) or 0)
+        buy = int(data.get("AnalystRatingStrongBuy", 0) or 0) + int(data.get("AnalystRatingBuy", 0) or 0)
+        hold = int(data.get("AnalystRatingHold", 0) or 0)
+        sell = int(data.get("AnalystRatingSell", 0) or 0) + int(data.get("AnalystRatingStrongSell", 0) or 0)
+        return {"target_price": target_price, "buy": buy, "hold": hold, "sell": sell}
+    except (ValueError, TypeError):
+        return None
 
 
 def genera_commento_ai(risultati):
@@ -205,43 +250,84 @@ def genera_commento_ai(risultati):
 def comando_analizza():
     invia_messaggio("🔎 Analisi in corso, richiede qualche minuto...")
 
-    top_losers = get_top_losers()
-    if not top_losers:
+    tutti_candidati = get_candidati_mercato()
+    if not tutti_candidati:
         invia_messaggio("⚠️ Non riesco a recuperare i dati di mercato ora (mercato chiuso o budget esaurito).")
         return
 
-    candidati = [t for t in top_losers if t["change_pct"] <= -CALO_MINIMO_PCT]
+    candidati = [t for t in tutti_candidati if supera_prefiltro(t)]
     candidati.sort(key=lambda t: t["change_pct"])
     candidati = candidati[:MAX_TITOLI_ANALISI_APPROFONDITA]
 
     if not candidati:
-        invia_messaggio(f"📊 Nessun titolo USA ha superato oggi la soglia di calo del {CALO_MINIMO_PCT}%.")
+        invia_messaggio(
+            f"📊 Nessun titolo USA supera oggi i filtri di base (calo ≥{CALO_MINIMO_PCT}%, "
+            f"prezzo ≥{PREZZO_MINIMO}$, volume ≥{VOLUME_MINIMO:,})."
+        )
         return
 
-    righe = ["📉 <b>Analisi a comando</b>\n"]
     risultati_completi = []
     for base in candidati:
         time.sleep(13)
         rsi = get_rsi(base["symbol"])
         time.sleep(13)
         sma200 = get_sma(base["symbol"], 200)
+        time.sleep(13)
+        analisti = get_analyst_data(base["symbol"])
 
         trend_positivo = sma200 is not None and base["price"] > sma200
         ipervenduto = rsi is not None and rsi < RSI_IPERVENDUTO
-        stelle = "⭐" * (int(trend_positivo) + int(ipervenduto))
+
+        sconto_target = False
+        maggioranza_buy = False
+        sconto_pct = None
+        if analisti:
+            copertura_reale = (analisti["buy"] + analisti["hold"] + analisti["sell"]) > 0
+            if copertura_reale and analisti["target_price"] > 0:
+                sconto_pct = (analisti["target_price"] - base["price"]) / base["price"] * 100
+                sconto_target = sconto_pct >= SCONTO_TARGET_MINIMO_PCT
+                maggioranza_buy = analisti["buy"] > (analisti["hold"] + analisti["sell"])
+
+        punteggio = sum([trend_positivo, ipervenduto, sconto_target, maggioranza_buy])
         rsi_txt = f"{rsi:.1f}" if rsi is not None else "N/D"
         trend_txt = "positivo" if trend_positivo else "negativo"
 
-        righe.append(
-            f"\n<b>{base['symbol']}</b>  {base['change_pct']:.2f}%\n"
-            f"Prezzo: {base['price']:.2f}\n"
-            f"RSI: {rsi_txt}\n"
-            f"Trend: {trend_txt}\n"
-            f"Interesse: {stelle if stelle else '–'}\n"
-        )
-        risultati_completi.append({**base, "rsi": rsi, "rsi_txt": rsi_txt, "trend_txt": trend_txt})
+        risultati_completi.append({
+            **base, "rsi": rsi, "rsi_txt": rsi_txt, "trend_txt": trend_txt,
+            "trend_positivo": trend_positivo, "ipervenduto": ipervenduto,
+            "analisti": analisti, "sconto_pct": sconto_pct, "punteggio": punteggio,
+        })
 
-    commento_ai = genera_commento_ai(risultati_completi)
+    occasioni = [r for r in risultati_completi if r["punteggio"] >= PUNTEGGIO_MINIMO_OCCASIONE]
+    occasioni.sort(key=lambda r: r["punteggio"], reverse=True)
+
+    if not occasioni:
+        invia_messaggio(
+            f"📊 {len(risultati_completi)} titoli controllati, ma nessuno ha raggiunto "
+            f"il punteggio minimo {PUNTEGGIO_MINIMO_OCCASIONE}/4 per essere una vera occasione."
+        )
+        return
+
+    righe = ["🎯 <b>Possibili occasioni (a comando)</b>\n"]
+    for r in occasioni:
+        stelle = "⭐" * r["punteggio"]
+        if r["analisti"] and r["sconto_pct"] is not None:
+            analisti_txt = (
+                f"Target: {r['analisti']['target_price']:.2f} ({r['sconto_pct']:+.1f}%), "
+                f"{r['analisti']['buy']}buy/{r['analisti']['hold']}hold/{r['analisti']['sell']}sell"
+            )
+        else:
+            analisti_txt = "⚠️ Nessuna copertura analisti reale"
+        righe.append(
+            f"\n<b>{r['symbol']}</b>  {r['change_pct']:.2f}%  [{r['punteggio']}/4]\n"
+            f"Prezzo: {r['price']:.2f}\n"
+            f"RSI: {r['rsi_txt']}\n"
+            f"Trend: {r['trend_txt']}\n"
+            f"{analisti_txt}\n"
+            f"Punteggio: {stelle}\n"
+        )
+
+    commento_ai = genera_commento_ai(occasioni)
     if commento_ai:
         righe.append(f"\n🤖 <b>Commento AI</b>\n{commento_ai}\n")
 
@@ -256,11 +342,11 @@ def comando_analizza():
 def comando_help():
     invia_messaggio(
         "🤖 <b>Comandi disponibili</b>\n\n"
-        "/analizza - controlla ora i titoli USA in maggior calo\n"
+        "/analizza - cerca ora vere occasioni USA (calo + trend + RSI + target analisti)\n"
         "/mercato - stato mercati USA/Europa (aperto o chiuso)\n"
         "/help - questo messaggio\n\n"
         "Nota: i comandi vengono controllati ogni 10 minuti circa, "
-        "non sono istantanei."
+        "non sono istantanei. Solo i titoli con punteggio ≥2/4 vengono mostrati."
     )
 
 
