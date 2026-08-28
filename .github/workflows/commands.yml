@@ -6,7 +6,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write   # necessario per ricommittare il file di stato
+  contents: write   # Necessario per fare il push del file di stato
 
 jobs:
   check-commands:
@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true # Accetta le credenziali per il push sicuro
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -35,7 +37,9 @@ jobs:
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_update_id.txt
-          git diff --quiet && git diff --staged --quiet || git commit -m "aggiorna stato comandi [skip ci]"
-          git push
-        continue-on-error: true
+          
+          # Controlla se il file esiste prima di aggiungerlo per evitare errori
+          if [ -f last_update_id.txt ]; then
+            git add last_update_id.txt
+            git diff --quiet && git diff --staged --quiet || (git commit -m "aggiorna stato comandi [skip ci]" && git push)
+          fi
