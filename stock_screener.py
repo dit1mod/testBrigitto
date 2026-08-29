@@ -204,11 +204,31 @@ def get_analyst_data(symbol):
         return None
 
 
-def send_telegram_message(text):
+ISCRITTI_FILE = "subscribers.txt"
+
+
+def leggi_iscritti():
+    """Ritorna l'insieme dei chat_id iscritti alla notifica giornaliera."""
+    if os.path.exists(ISCRITTI_FILE):
+        with open(ISCRITTI_FILE, "r") as f:
+            return {riga.strip() for riga in f if riga.strip()}
+    return set()
+
+
+def send_telegram_message(text, chat_id=None):
+    """Manda un messaggio a un chat_id specifico (default: proprietario)."""
     url = TELEGRAM_API_URL.format(token=TELEGRAM_BOT_TOKEN)
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    payload = {"chat_id": chat_id or TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
     r = requests.post(url, data=payload, timeout=15)
     return r.ok
+
+
+def invia_a_tutti_gli_iscritti(text):
+    """Manda lo stesso messaggio al proprietario + a tutti gli iscritti."""
+    destinatari = {TELEGRAM_CHAT_ID} | leggi_iscritti()
+    for chat_id in destinatari:
+        send_telegram_message(text, chat_id)
+    print(f"Messaggio inviato a {len(destinatari)} destinatari.")
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +409,7 @@ def formatta_messaggio(risultati, commento_ai):
 def main():
     tutti_candidati = get_candidati_mercato()
     if not tutti_candidati:
-        send_telegram_message(
+        invia_a_tutti_gli_iscritti(
             "📊 Non è stato possibile recuperare i dati di mercato oggi "
             "(o nessun titolo disponibile)."
         )
@@ -416,10 +436,10 @@ def main():
     messaggio = formatta_messaggio(occasioni, commento_ai)
 
     if messaggio:
-        send_telegram_message(messaggio)
+        invia_a_tutti_gli_iscritti(messaggio)
         print("Notifica inviata.")
     else:
-        send_telegram_message(
+        invia_a_tutti_gli_iscritti(
             f"📊 Nessun titolo USA ha superato oggi il punteggio minimo di "
             f"{PUNTEGGIO_MINIMO_OCCASIONE}/4 per essere segnalato come occasione "
             f"(controllati {len(risultati)} titoli in calo)."
