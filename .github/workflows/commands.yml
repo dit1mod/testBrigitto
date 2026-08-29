@@ -6,7 +6,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write   # Necessario per fare il push del file di stato
+  contents: write   # necessario per ricommittare il file di stato
 
 jobs:
   check-commands:
@@ -14,8 +14,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true # Accetta le credenziali per il push sicuro
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -33,13 +31,22 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python bot_commands.py
 
-      - name: Commit updated state file (if changed)
+      - name: Commit updated state files (if changed)
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Controlla se il file esiste prima di aggiungerlo per evitare errori
-          if [ -f last_update_id.txt ]; then
-            git add last_update_id.txt
-            git diff --quiet && git diff --staged --quiet || (git commit -m "aggiorna stato comandi [skip ci]" && git push)
+          git add -A -- last_update_id.txt subscribers.txt
+          if ! git diff --staged --quiet; then
+            git commit -m "aggiorna stato comandi e iscritti [skip ci]"
+            for i in 1 2 3; do
+              if git push; then
+                echo "Push riuscito al tentativo $i"
+                break
+              fi
+              echo "Push fallito, riprovo dopo aver riallineato con origin (tentativo $i)..."
+              git pull --rebase origin main
+              sleep 3
+            done
+          else
+            echo "Nessuna modifica allo stato da salvare."
           fi
