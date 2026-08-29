@@ -1,14 +1,18 @@
 """
-Bot Comandi Telegram (polling via GitHub Actions)
-----------------------------------------------------
+Bot Comandi Telegram (polling via GitHub Actions) + gestione iscritti
+------------------------------------------------------------------------
 Questo script viene lanciato ogni 10 minuti da GitHub Actions. Ad ogni
-esecuzione controlla se hai scritto un nuovo comando al bot dall'ultima
-volta, e se sì lo esegue:
+esecuzione controlla se qualcuno ha scritto un nuovo comando al bot:
 
-  /analizza  -> scansiona i top losers USA e manda l'analisi (come la
-                notifica giornaliera, ma a comando)
-  /mercato   -> dice se i mercati USA/Europa sono aperti o chiusi ora
-  /help      -> elenco comandi disponibili
+  /start     -> iscrive chi scrive alla notifica giornaliera condivisa
+  /stop      -> disiscrive chi scrive
+  /help      -> elenco comandi disponibili (per tutti)
+  /analizza  -> analisi a comando (SOLO per il proprietario del bot)
+  /mercato   -> stato mercati (SOLO per il proprietario del bot)
+
+Gli iscritti sono salvati in un file (subscribers.txt) nel repository,
+che la notifica giornaliera (stock_screener.py) legge per sapere a chi
+mandare il messaggio, oltre che al proprietario.
 
 Per "ricordarsi" quali messaggi ha gia' letto, lo script salva un piccolo
 file (last_update_id.txt) nel repository stesso, che il workflow si
@@ -23,7 +27,7 @@ import requests
 
 ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")  # proprietario del bot
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{{model}}:generateContent"
@@ -40,6 +44,7 @@ PUNTEGGIO_MINIMO_OCCASIONE = 2
 MAX_TITOLI_ANALISI_APPROFONDITA = 7
 
 STATO_FILE = "last_update_id.txt"
+ISCRITTI_FILE = "subscribers.txt"
 
 # Regioni di mercato da mostrare nel comando /mercato
 REGIONI_INTERESSE = ["United States", "Germany", "France", "United Kingdom"]
@@ -54,6 +59,24 @@ def _consuma_budget():
         return False
     _chiamate_effettuate += 1
     return True
+
+
+# ---------------------------------------------------------------------------
+# GESTIONE ISCRITTI
+# ---------------------------------------------------------------------------
+
+def leggi_iscritti():
+    """Ritorna l'insieme dei chat_id iscritti (stringhe)."""
+    if os.path.exists(ISCRITTI_FILE):
+        with open(ISCRITTI_FILE, "r") as f:
+            return {riga.strip() for riga in f if riga.strip()}
+    return set()
+
+
+def salva_iscritti(iscritti):
+    with open(ISCRITTI_FILE, "w") as f:
+        for chat_id in sorted(iscritti):
+            f.write(f"{chat_id}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -82,10 +105,16 @@ def get_nuovi_messaggi(offset):
     return r.json().get("result", [])
 
 
-def invia_messaggio(testo):
+def invia_a(chat_id, testo):
+    """Manda un messaggio a un chat_id specifico."""
     url = TELEGRAM_API_BASE.format(token=TELEGRAM_BOT_TOKEN) + "/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": testo, "parse_mode": "HTML"}
+    payload = {"chat_id": chat_id, "text": testo, "parse_mode": "HTML"}
     requests.post(url, data=payload, timeout=15)
+
+
+def invia_messaggio(testo):
+    """Manda un messaggio al proprietario del bot (comportamento di prima)."""
+    invia_a(TELEGRAM_CHAT_ID, testo)
 
 
 # ---------------------------------------------------------------------------
@@ -336,17 +365,45 @@ def comando_analizza():
 
 
 # ---------------------------------------------------------------------------
-# COMANDO: /help
+# COMANDI: /start, /stop, /help  (aperti a chiunque)
 # ---------------------------------------------------------------------------
 
-def comando_help():
-    invia_messaggio(
+def comando_start(chat_id):
+    iscritti = leggi_iscritti()
+    if chat_id in iscritti or chat_id == TELEGRAM_CHAT_ID:
+        invia_a(chat_id, "✅ Sei già iscritto alla notifica giornaliera!")
+        return
+    iscritti.add(chat_id)
+    salva_iscritti(iscritti)
+    invia_a(
+        chat_id,
+        "🎉 Iscrizione completata! Riceverai la notifica giornaliera con "
+        "le possibili occasioni sul mercato USA (analisi automatica, "
+        "non è un consiglio di investimento).\n\n"
+        "Scrivi /stop in qualsiasi momento per disiscriverti."
+    )
+
+
+def comando_stop(chat_id):
+    iscritti = leggi_iscritti()
+    if chat_id not in iscritti:
+        invia_a(chat_id, "Non risulti iscritto.")
+        return
+    iscritti.discard(chat_id)
+    salva_iscritti(iscritti)
+    invia_a(chat_id, "❌ Disiscrizione completata. Non riceverai più la notifica giornaliera.")
+
+
+def comando_help(chat_id):
+    invia_a(
+        chat_id,
         "🤖 <b>Comandi disponibili</b>\n\n"
-        "/analizza - cerca ora vere occasioni USA (calo + trend + RSI + target analisti)\n"
-        "/mercato - stato mercati USA/Europa (aperto o chiuso)\n"
+        "/start - iscriviti alla notifica giornaliera con le occasioni USA\n"
+        "/stop - disiscriviti\n"
         "/help - questo messaggio\n\n"
-        "Nota: i comandi vengono controllati ogni 10 minuti circa, "
-        "non sono istantanei. Solo i titoli con punteggio ≥2/4 vengono mostrati."
+        "La notifica arriva una volta al giorno, in automatico, con i titoli "
+        "che superano i nostri filtri (calo, trend, RSI, target analisti). "
+        "Non è un consiglio di investimento."
     )
 
 
@@ -369,14 +426,29 @@ def main():
     ultimo_id = offset
     for msg in messaggi:
         ultimo_id = msg["update_id"]
-        testo = msg.get("message", {}).get("text", "").strip().lower()
+        dati_messaggio = msg.get("message", {})
+        testo = dati_messaggio.get("text", "").strip().lower()
+        mittente = str(dati_messaggio.get("chat", {}).get("id", ""))
 
-        if testo == "/analizza":
-            comando_analizza()
+        if not mittente:
+            continue
+
+        if testo == "/start":
+            comando_start(mittente)
+        elif testo == "/stop":
+            comando_stop(mittente)
+        elif testo == "/help":
+            comando_help(mittente)
+        elif testo == "/analizza":
+            if mittente == TELEGRAM_CHAT_ID:
+                comando_analizza()
+            else:
+                invia_a(mittente, "Questo comando è riservato. Riceverai comunque la notifica giornaliera se iscritto con /start.")
         elif testo == "/mercato":
-            comando_mercato()
-        elif testo in ("/help", "/start"):
-            comando_help()
+            if mittente == TELEGRAM_CHAT_ID:
+                comando_mercato()
+            else:
+                invia_a(mittente, "Questo comando è riservato. Riceverai comunque la notifica giornaliera se iscritto con /start.")
         # comandi sconosciuti: ignorati silenziosamente
 
     salva_ultimo_update_id(ultimo_id)
