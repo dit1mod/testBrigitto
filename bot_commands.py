@@ -1,3 +1,4 @@
+"""
 Bot Comandi Telegram (polling via GitHub Actions)
 ----------------------------------------------------
 Questo script viene lanciato ogni 10 minuti da GitHub Actions. Ad ogni
@@ -25,7 +26,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{{model}}:generateContent"
 
 ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}"
@@ -77,21 +78,14 @@ def get_nuovi_messaggi(offset):
     params = {"timeout": 0}
     if offset is not None:
         params["offset"] = offset + 1
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        return r.json().get("result", [])
-    except Exception as e:
-        print(f"Errore getUpdates: {e}")
-        return []
+    r = requests.get(url, params=params, timeout=15)
+    return r.json().get("result", [])
 
 
 def invia_messaggio(testo):
     url = TELEGRAM_API_BASE.format(token=TELEGRAM_BOT_TOKEN) + "/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": testo, "parse_mode": "HTML"}
-    try:
-        requests.post(url, data=payload, timeout=15)
-    except Exception as e:
-        print(f"Errore invio messaggio: {e}")
+    requests.post(url, data=payload, timeout=15)
 
 
 # ---------------------------------------------------------------------------
@@ -104,11 +98,8 @@ def comando_mercato():
         return
 
     params = {"function": "MARKET_STATUS", "apikey": ALPHA_VANTAGE_API_KEY}
-    try:
-        r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
-        mercati = r.json().get("markets", [])
-    except Exception:
-        mercati = []
+    r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
+    mercati = r.json().get("markets", [])
 
     if not mercati:
         invia_messaggio("⚠️ Non riesco a recuperare lo stato dei mercati in questo momento.")
@@ -128,18 +119,16 @@ def comando_mercato():
 
 
 # ---------------------------------------------------------------------------
-# COMANDO: /analizza (Screener)
+# COMANDO: /analizza  (stessa logica dello screener giornaliero)
 # ---------------------------------------------------------------------------
 
 def get_candidati_mercato():
+    """Combina i top losers con i titoli piu' scambiati in rosso (1 chiamata API)."""
     if not _consuma_budget():
         return []
     params = {"function": "TOP_GAINERS_LOSERS", "apikey": ALPHA_VANTAGE_API_KEY}
-    try:
-        r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
-        data = r.json()
-    except Exception:
-        return []
+    r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
+    data = r.json()
 
     def _parse(lista, fonte):
         risultati = []
@@ -182,15 +171,12 @@ def get_rsi(symbol):
         "function": "RSI", "symbol": symbol, "interval": "daily",
         "time_period": 14, "series_type": "close", "apikey": ALPHA_VANTAGE_API_KEY,
     }
-    try:
-        r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
-        data = r.json().get("Technical Analysis: RSI", {})
-        if not data:
-            return None
-        ultima = sorted(data.keys(), reverse=True)[0]
-        return float(data[ultima]["RSI"])
-    except Exception:
+    r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
+    data = r.json().get("Technical Analysis: RSI", {})
+    if not data:
         return None
+    ultima = sorted(data.keys(), reverse=True)[0]
+    return float(data[ultima]["RSI"])
 
 
 def get_sma(symbol, time_period):
@@ -200,86 +186,201 @@ def get_sma(symbol, time_period):
         "function": "SMA", "symbol": symbol, "interval": "daily",
         "time_period": time_period, "series_type": "close", "apikey": ALPHA_VANTAGE_API_KEY,
     }
-    try:
-        r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
-        data = r.json().get("Technical Analysis: SMA", {})
-        if not data:
-            return None
-        ultima = sorted(data.keys(), reverse=True)[0]
-        return float(data[ultima]["SMA"])
-    except Exception:
+    r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
+    data = r.json().get("Technical Analysis: SMA", {})
+    if not data:
         return None
+    ultima = sorted(data.keys(), reverse=True)[0]
+    return float(data[ultima]["SMA"])
 
 
 def get_analyst_data(symbol):
     if not _consuma_budget():
         return None
     params = {"function": "OVERVIEW", "symbol": symbol, "apikey": ALPHA_VANTAGE_API_KEY}
+    r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
+    data = r.json()
+    if not data or "AnalystTargetPrice" not in data:
+        return None
     try:
-        r = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=15)
-        data = r.json()
-        if not data or "AnalystTargetPrice" not in data:
-            return None
         target_price = float(data.get("AnalystTargetPrice", 0) or 0)
         buy = int(data.get("AnalystRatingStrongBuy", 0) or 0) + int(data.get("AnalystRatingBuy", 0) or 0)
         hold = int(data.get("AnalystRatingHold", 0) or 0)
         sell = int(data.get("AnalystRatingSell", 0) or 0) + int(data.get("AnalystRatingStrongSell", 0) or 0)
         return {"target_price": target_price, "buy": buy, "hold": hold, "sell": sell}
-    except Exception:
+    except (ValueError, TypeError):
         return None
 
 
 def genera_commento_ai(risultati):
+    """Chiede a Gemini (gratis) un breve commento in italiano. Ritorna None
+    se la chiave non e' configurata o la chiamata fallisce."""
     if not GEMINI_API_KEY or not risultati:
         return None
 
     righe_dati = []
     for r in risultati:
         righe_dati.append(
-            f"- {r['symbol']}: prezzo {r['price']:.2f}, variazione {r['change_pct']:.2f}%, "
-            f"RSI {r.get('rsi', 'N/D')}"
+            f"- {r['symbol']}: prezzo {r['price']:.2f}, variazione oggi {r['change_pct']:.2f}%, "
+            f"RSI {r['rsi_txt']}, trend vs SMA200 {r['trend_txt']}"
         )
     dati_testuali = "\n".join(righe_dati)
 
     prompt = (
         "Sei un analista finanziario che scrive per un investitore retail italiano "
-        "con esperienza intermedia. Commenta brevemente in 3-4 frasi questa lista di titoli "
-        "in forte calo oggi, evidenziando se ci sono anomalie o spunti interessanti:\n\n"
-        f"{dati_testuali}\n\nMantieni un tono professionale ed evita consigli diretti di acquisto."
+        "con esperienza intermedia. Ti fornisco un elenco di titoli USA in forte calo "
+        "oggi con alcuni indicatori tecnici. Per ciascun titolo scrivi 1-2 frasi brevi "
+        "in italiano su cosa potrebbe significare il quadro tecnico. Non dare consigli "
+        "di acquisto diretti, descrivi solo la situazione tecnica. Massimo 250 parole.\n\n"
+        f"Titoli da commentare:\n{dati_testuali}"
     )
 
-    headers = {"Content-Type": "application/json"}
+    url = GEMINI_API_URL.format(model=GEMINI_MODEL)
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    
     try:
-        url = GEMINI_API_URL.format(model=GEMINI_MODEL)
-        r = requests.post(f"{url}?key={GEMINI_API_KEY}", json=payload, headers=headers, timeout=15)
-        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:
-        return "⚠️ Non è stato possibile generare il commento dell'Intelligenza Artificiale."
+        r = requests.post(url, params={"key": GEMINI_API_KEY}, json=payload, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        print(f"Gemini non disponibile: {e}")
+        return None
 
 
 def comando_analizza():
-    invia_messaggio("🔍 Avvio scansione del mercato USA... Potrebbe richiedere un minuto.")
-    
-    candidati = get_candidati_mercato()
-    filtrati = [c for c in candidati if supera_prefiltro(c)]
-    
-    if not filtrati:
-        invia_messaggio("✅ Scansione completata: nessun titolo soddisfa i criteri di calo critico al momento.")
+    invia_messaggio("🔎 Analisi in corso, richiede qualche minuto...")
+
+    tutti_candidati = get_candidati_mercato()
+    if not tutti_candidati:
+        invia_messaggio("⚠️ Non riesco a recuperare i dati di mercato ora (mercato chiuso o budget esaurito).")
         return
 
-    # Limita l'analisi per non bruciare troppe chiamate API di fila
-    selezionati = filtrati[:MAX_TITOLI_ANALISI_APPROFONDITA]
-    buoni = []
+    candidati = [t for t in tutti_candidati if supera_prefiltro(t)]
+    candidati.sort(key=lambda t: t["change_pct"])
+    candidati = candidati[:MAX_TITOLI_ANALISI_APPROFONDITA]
 
-    for s in selezionati:
-        rsi = get_rsi(s["symbol"])
-        if rsi is not None:
-            s["rsi"] = rsi
-            buoni.append(s)
-        time.sleep(1) # Piccolo ritardo di sicurezza per l'API rate limit
-
-    if not buoni:
-        invia_messaggio("⚠️ Impossibile completare l'analisi tecnica a causa di limiti sulle API.")
+    if not candidati:
+        invia_messaggio(
+            f"📊 Nessun titolo USA supera oggi i filtri di base (calo ≥{CALO_MINIMO_PCT}%, "
+            f"prezzo ≥{PREZZO_MINIMO}$, volume ≥{VOLUME_MINIMO:,})."
+        )
         return
+
+    risultati_completi = []
+    for base in candidati:
+        time.sleep(13)
+        rsi = get_rsi(base["symbol"])
+        time.sleep(13)
+        sma200 = get_sma(base["symbol"], 200)
+        time.sleep(13)
+        analisti = get_analyst_data(base["symbol"])
+
+        trend_positivo = sma200 is not None and base["price"] > sma200
+        ipervenduto = rsi is not None and rsi < RSI_IPERVENDUTO
+
+        sconto_target = False
+        maggioranza_buy = False
+        sconto_pct = None
+        if analisti:
+            copertura_reale = (analisti["buy"] + analisti["hold"] + analisti["sell"]) > 0
+            if copertura_reale and analisti["target_price"] > 0:
+                sconto_pct = (analisti["target_price"] - base["price"]) / base["price"] * 100
+                sconto_target = sconto_pct >= SCONTO_TARGET_MINIMO_PCT
+                maggioranza_buy = analisti["buy"] > (analisti["hold"] + analisti["sell"])
+
+        punteggio = sum([trend_positivo, ipervenduto, sconto_target, maggioranza_buy])
+        rsi_txt = f"{rsi:.1f}" if rsi is not None else "N/D"
+        trend_txt = "positivo" if trend_positivo else "negativo"
+
+        risultati_completi.append({
+            **base, "rsi": rsi, "rsi_txt": rsi_txt, "trend_txt": trend_txt,
+            "trend_positivo": trend_positivo, "ipervenduto": ipervenduto,
+            "analisti": analisti, "sconto_pct": sconto_pct, "punteggio": punteggio,
+        })
+
+    occasioni = [r for r in risultati_completi if r["punteggio"] >= PUNTEGGIO_MINIMO_OCCASIONE]
+    occasioni.sort(key=lambda r: r["punteggio"], reverse=True)
+
+    if not occasioni:
+        invia_messaggio(
+            f"📊 {len(risultati_completi)} titoli controllati, ma nessuno ha raggiunto "
+            f"il punteggio minimo {PUNTEGGIO_MINIMO_OCCASIONE}/4 per essere una vera occasione."
+        )
+        return
+
+    righe = ["🎯 <b>Possibili occasioni (a comando)</b>\n"]
+    for r in occasioni:
+        stelle = "⭐" * r["punteggio"]
+        if r["analisti"] and r["sconto_pct"] is not None:
+            analisti_txt = (
+                f"Target: {r['analisti']['target_price']:.2f} ({r['sconto_pct']:+.1f}%), "
+                f"{r['analisti']['buy']}buy/{r['analisti']['hold']}hold/{r['analisti']['sell']}sell"
+            )
+        else:
+            analisti_txt = "⚠️ Nessuna copertura analisti reale"
+        righe.append(
+            f"\n<b>{r['symbol']}</b>  {r['change_pct']:.2f}%  [{r['punteggio']}/4]\n"
+            f"Prezzo: {r['price']:.2f}\n"
+            f"RSI: {r['rsi_txt']}\n"
+            f"Trend: {r['trend_txt']}\n"
+            f"{analisti_txt}\n"
+            f"Punteggio: {stelle}\n"
+        )
+
+    commento_ai = genera_commento_ai(occasioni)
+    if commento_ai:
+        righe.append(f"\n🤖 <b>Commento AI</b>\n{commento_ai}\n")
+
+    righe.append("\n⚠️ Non è un consiglio di investimento.")
+    invia_messaggio("\n".join(righe))
+
+
+# ---------------------------------------------------------------------------
+# COMANDO: /help
+# ---------------------------------------------------------------------------
+
+def comando_help():
+    invia_messaggio(
+        "🤖 <b>Comandi disponibili</b>\n\n"
+        "/analizza - cerca ora vere occasioni USA (calo + trend + RSI + target analisti)\n"
+        "/mercato - stato mercati USA/Europa (aperto o chiuso)\n"
+        "/help - questo messaggio\n\n"
+        "Nota: i comandi vengono controllati ogni 10 minuti circa, "
+        "non sono istantanei. Solo i titoli con punteggio ≥2/4 vengono mostrati."
+    )
+
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+
+def main():
+    if not (ALPHA_VANTAGE_API_KEY and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        print("Mancano una o più variabili d'ambiente richieste.")
+        return
+
+    offset = leggi_ultimo_update_id()
+    messaggi = get_nuovi_messaggi(offset)
+
+    if not messaggi:
+        print("Nessun nuovo comando.")
+        return
+
+    ultimo_id = offset
+    for msg in messaggi:
+        ultimo_id = msg["update_id"]
+        testo = msg.get("message", {}).get("text", "").strip().lower()
+
+        if testo == "/analizza":
+            comando_analizza()
+        elif testo == "/mercato":
+            comando_mercato()
+        elif testo in ("/help", "/start"):
+            comando_help()
+        # comandi sconosciuti: ignorati silenziosamente
+
+    salva_ultimo_update_id(ultimo_id)
+
+
+if __name__ == "__main__":
+    main()
